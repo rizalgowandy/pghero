@@ -2,17 +2,16 @@ module PgHero
   module Methods
     module Tables
       def table_hit_rate
-        select_one(<<-SQL
+        select_one <<~SQL
           SELECT
             sum(heap_blks_hit) / nullif(sum(heap_blks_hit) + sum(heap_blks_read), 0) AS rate
           FROM
             pg_statio_user_tables
         SQL
-        )
       end
 
       def table_caching
-        select_all <<-SQL
+        select_all <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -29,7 +28,7 @@ module PgHero
       end
 
       def unused_tables
-        select_all <<-SQL
+        select_all <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -45,7 +44,7 @@ module PgHero
       end
 
       def table_stats(schema: nil, table: nil)
-        select_all <<-SQL
+        sql = <<~SQL
           SELECT
             nspname AS schema,
             relname AS table,
@@ -57,11 +56,15 @@ module PgHero
             pg_namespace ON pg_namespace.oid = pg_class.relnamespace
           WHERE
             relkind = 'r'
-            #{schema ? "AND nspname = #{quote(schema)}" : nil}
-            #{table ? "AND relname IN (#{Array(table).map { |t| quote(t) }.join(", ")})" : nil}
+            #{"AND nspname = :schema" if schema}
+            #{"AND relname IN (:table)" if table}
           ORDER BY
             1, 2
         SQL
+        binds = {}
+        binds[:schema] = schema if schema
+        binds[:table] = Array(table) if table
+        select_all(sql, binds)
       end
     end
   end

@@ -1,16 +1,16 @@
 module PgHero
   class HomeController < ActionController::Base
-    layout "pg_hero/application"
+    http_basic_authenticate_with name: PgHero.username, password: PgHero.password if PgHero.password
 
     protect_from_forgery with: :exception
 
-    http_basic_authenticate_with name: PgHero.username, password: PgHero.password if PgHero.password
-
     before_action :check_api
     before_action :set_database
+    before_action :check_server_version
     before_action :set_query_stats_enabled
     before_action :set_show_details, only: [:index, :queries, :show_query]
-    before_action :ensure_query_stats, only: [:queries]
+    before_action :ensure_query_stats, only: [:queries, :show_query, :reset_query_stats]
+    before_action :ensure_kill_enabled, only: [:kill, :kill_long_running_queries, :kill_all]
 
     if PgHero.config["override_csp"]
       # note: this does not take into account asset hosts
@@ -23,6 +23,8 @@ module PgHero
       end
     end
 
+    layout "pg_hero/application"
+
     def index
       @title = "Overview"
       @extended = params[:extended]
@@ -34,8 +36,7 @@ module PgHero
         @inactive_replication_slots = @database.replication_slots.select { |r| !r[:active] }
       end
 
-      @walsender_queries, long_running_queries = @database.long_running_queries.partition { |q| q[:backend_type] == "walsender" }
-      @autovacuum_queries, @long_running_queries = long_running_queries.partition { |q| q[:query].starts_with?("autovacuum:") }
+      @autovacuum_queries, @long_running_queries = @database.long_running_queries.partition { |q| q[:backend_type] == "autovacuum worker" }
 
       connection_states = @database.connection_states
       @total_connections = connection_states.values.sum
@@ -46,11 +47,18 @@ module PgHero
 
       @transaction_id_danger = @database.transaction_id_danger(threshold: 1500000000)
 
-      @readable_sequences, @unreadable_sequences = @database.sequences.partition { |s| s[:readable] }
+      sequences, @sequences_timeout = rescue_timeout([]) { @database.sequences }
+      @readable_sequences, @unreadable_sequences = sequences.partition { |s| s[:readable] }
 
       @sequence_danger = @database.sequence_danger(threshold: (params[:sequence_threshold] || 0.9).to_f, sequences: @readable_sequences)
 
-      @indexes = @database.indexes
+      @indexes, @indexes_timeout =
+        if @sequences_timeout
+          # skip indexes for faster loading
+          [[], true]
+        else
+          rescue_timeout([]) { @database.indexes }
+        end
       @invalid_indexes = @database.invalid_indexes(indexes: @indexes)
       @invalid_constraints = @database.invalid_constraints
       @duplicate_indexes = @database.duplicate_indexes(indexes: @indexes)
@@ -69,7 +77,7 @@ module PgHero
         @index_hit_rate = @database.index_hit_rate || 0
         @table_hit_rate = @database.table_hit_rate || 0
         @good_cache_rate = @table_hit_rate >= @database.cache_hit_rate_threshold / 100.0 && @index_hit_rate >= @database.cache_hit_rate_threshold / 100.0
-        @unused_indexes = @database.unused_indexes(max_scans: 0)
+        @unused_indexes = @database.unused_indexes(max_scans: 0, min_size: @database.unused_index_bytes)
       end
 
       @show_migrations = PgHero.show_migrations
@@ -80,11 +88,11 @@ module PgHero
       @days = (params[:days] || 7).to_i
       @database_size = @database.database_size
       @only_tables = params[:tables].present?
-      @relation_sizes = @only_tables ? @database.table_sizes : @database.relation_sizes
+      @relation_sizes, @sizes_timeout = rescue_timeout([]) { @only_tables ? @database.table_sizes : @database.relation_sizes }
       @space_stats_enabled = @database.space_stats_enabled? && !@only_tables
       if @space_stats_enabled
         space_growth = @database.space_growth(days: @days, relation_sizes: @relation_sizes)
-        @growth_bytes_by_relation = Hash[ space_growth.map { |r| [[r[:schema], r[:relation]], r[:growth_bytes]] } ]
+        @growth_bytes_by_relation = space_growth.to_h { |r| [[r[:schema], r[:relation]], r[:growth_bytes]] }
         if params[:sort] == "growth"
           @relation_sizes.sort_by! { |r| s = @growth_bytes_by_relation[[r[:schema], r[:relation]]]; [s ? 0 : 1, -s.to_i, r[:schema], r[:relation]] }
         end
@@ -99,6 +107,7 @@ module PgHero
       across = params[:across].to_s.split(",")
       @unused_indexes = @database.unused_indexes(max_scans: 0, across: across)
       @unused_index_names = Set.new(@unused_indexes.map { |r| r[:index] })
+      @unused_indexes = @unused_indexes.select { |r| r[:size_bytes] >= @database.unused_index_bytes }
       @show_migrations = PgHero.show_migrations
       @system_stats_enabled = @database.system_stats_enabled?
       @index_bloat = [] # @database.index_bloat
@@ -109,7 +118,7 @@ module PgHero
       @relation = params[:relation]
       @title = @relation
       relation_space_stats = @database.relation_space_stats(@relation, schema: @schema)
-      @chart_data = [{name: "Value", data: relation_space_stats.map { |r| [r[:captured_at].change(sec: 0), r[:size_bytes].to_i] }, library: chart_library_options}]
+      @chart_data = [{name: "Size", data: relation_space_stats.map { |r| [r[:captured_at].change(sec: 0), r[:size_bytes].to_i] }, library: chart_library_options}]
     end
 
     def index_bloat
@@ -133,6 +142,8 @@ module PgHero
       @sort = %w(average_time calls).include?(params[:sort]) ? params[:sort] : nil
       @min_average_time = params[:min_average_time] ? params[:min_average_time].to_i : nil
       @min_calls = params[:min_calls] ? params[:min_calls].to_i : nil
+      @user = params[:user] ? params[:user].to_s : nil
+      @link_user = !@user
 
       if @historical_query_stats_enabled
         begin
@@ -141,6 +152,13 @@ module PgHero
         rescue
           @error = true
         end
+      end
+
+      @link_options = {sort: @sort}
+      if @historical_query_stats_enabled
+        # use same format as JavaScript
+        @link_options[:start_at] = @start_at.utc.iso8601 if params[:start_at]
+        @link_options[:end_at] = @end_at.utc.iso8601 if params[:end_at]
       end
 
       @query_stats =
@@ -157,8 +175,16 @@ module PgHero
           )
         end
 
-      @indexes = @database.indexes
-      set_suggested_indexes
+      if @user
+        # filter in Ruby for accurate percent of total time
+        @query_stats = @query_stats.select { |v| v[:user] == @user }
+      end
+
+      if !@historical_query_stats_enabled || request.xhr?
+        set_suggested_indexes
+      else
+        @debug = params[:debug].present?
+      end
 
       # fix back button issue with caching
       response.headers["Cache-Control"] = "must-revalidate, no-store, no-cache, private"
@@ -168,23 +194,42 @@ module PgHero
     end
 
     def show_query
-      @query_hash = params[:query_hash].to_i
-      @user = params[:user].to_s
-      @title = @query_hash
+      query_hash = params[:query_hash].to_s
 
-      stats = @database.query_stats(historical: true, query_hash: @query_hash, start_at: 24.hours.ago).find { |qs| qs[:user] == @user }
+      # v needed for ambiguous values
+      hash_format =
+        if params[:v] != "2" && query_hash.size <= 20 && /\A-?\d{1,19}\z/.match?(query_hash)
+          1
+        elsif query_hash.size == 16 && /\A[0-9a-f]{16}\z/.match?(query_hash)
+          2
+        end
+
+      @query_hash =
+        case hash_format
+        when 2
+          # this format uses big endian to match Postgres to_hex
+          [query_hash].pack("H16").unpack1("q>")
+        when 1
+          query_hash.to_i
+        end
+
+      if @query_hash
+        stats = @database.query_stats(historical: true, user: @user, query_hash: @query_hash, start_at: 24.hours.ago).first
+      end
+
       if stats
         @query = stats[:query]
-        @explainable_query = stats[:explainable_query]
+        @title = @query.truncate(70)
+        @explainable_query = stats[:query] if @database.send(:explainable?, stats[:query])
 
         if @show_details
           query_hash_stats = @database.query_hash_stats(@query_hash, user: @user)
 
-          @chart_data = [{name: "Value", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), (r[:total_minutes] * 60 * 1000).round] }, library: chart_library_options}]
-          @chart2_data = [{name: "Value", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), r[:average_time].round(1)] }, library: chart_library_options}]
-          @chart3_data = [{name: "Value", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), r[:calls]] }, library: chart_library_options}]
+          @chart_data = [{name: "Total Time", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), r[:total_time].round] }, library: chart_library_options}]
+          @chart2_data = [{name: "Average Time", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), r[:average_time].round(1)] }, library: chart_library_options}]
+          @chart3_data = [{name: "Calls", data: query_hash_stats.map { |r| [r[:captured_at].change(sec: 0), r[:calls]] }, library: chart_library_options}]
 
-          @origins = Hash[query_hash_stats.group_by { |r| r[:origin].to_s }.map { |k, v| [k, v.size] }]
+          @origins = query_hash_stats.group_by { |r| r[:origin].to_s }.to_h { |k, v| [k, v.size] }
           @total_count = query_hash_stats.size
         end
 
@@ -192,11 +237,12 @@ module PgHero
         @tables.sort!
 
         if @tables.any?
-          @row_counts = Hash[@database.table_stats(table: @tables).map { |i| [i[:table], i[:estimated_rows]] }]
-          @indexes_by_table = @database.indexes.group_by { |i| i[:table] }
+          @row_counts = @database.table_stats(table: @tables).to_h { |i| [i[:table], i[:estimated_rows]] }
+          indexes, @indexes_timeout = rescue_timeout([]) { @database.indexes }
+          @indexes_by_table = indexes.group_by { |i| i[:table] }
         end
       else
-        render_text "Unknown query"
+        render_text "Unknown query", status: :not_found
       end
     end
 
@@ -208,18 +254,14 @@ module PgHero
         "1 week" => {duration: 1.week, period: 30.minutes},
         "2 weeks" => {duration: 2.weeks, period: 1.hours}
       }
-      if @database.system_stats_provider == :azure
-        # doesn't support 10, just 5 and 15
-        @periods["1 day"][:period] = 15.minutes
-      end
 
       @duration = (params[:duration] || 1.hour).to_i
       @period = (params[:period] || 60.seconds).to_i
 
       if @duration / @period > 1440
-        render_text "Too many data points"
+        render_text "Too many data points", status: :bad_request
       elsif @period % 60 != 0
-        render_text "Period must be a multiple of 60"
+        render_text "Period must be a multiple of 60", status: :bad_request
       end
     end
 
@@ -238,10 +280,6 @@ module PgHero
     def load_stats
       stats =
         case @database.system_stats_provider
-        when :azure
-          [
-            {name: "IO Consumption", data: @database.azure_stats("io_consumption_percent", **system_params), library: chart_library_options}
-          ]
         when :gcp
           [
             {name: "Read Ops", data: @database.read_iops_stats(**system_params).map { |k, v| [k, v ? v.round : v] }, library: chart_library_options},
@@ -258,35 +296,68 @@ module PgHero
 
     def free_space_stats
       render json: [
-        {name: "Free Space", data: @database.free_space_stats(duration: 14.days, period: 1.hour), library: chart_library_options},
+        {name: "Free Space", data: @database.free_space_stats(duration: 14.days, period: 1.hour), library: chart_library_options}
       ]
     end
 
     def explain
+      unless @explain_enabled
+        render_text "Explain not enabled", status: :bad_request
+        return
+      end
+
       @title = "Explain"
       @query = params[:query]
+      @explain_analyze_enabled = PgHero.explain_mode == "analyze"
+
       # TODO use get + token instead of post so users can share links
       # need to prevent CSRF and DoS
-      if request.post? && @query
+      if request.post? && @query.present?
         begin
-          prefix =
+          generic_plan = @database.server_version_num >= 160000 && @query.include?("$1")
+
+          explain_options =
             case params[:commit]
             when "Analyze"
-              "ANALYZE "
+              {analyze: true}
             when "Visualize"
-              "(ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON) "
+              if @explain_analyze_enabled && !generic_plan
+                {analyze: true, costs: true, verbose: true, buffers: true, format: "json"}
+              else
+                {costs: true, verbose: true, format: "json"}
+              end
             else
-              ""
+              {}
             end
-          @explanation = @database.explain("#{prefix}#{@query}")
+
+          explain_options[:generic_plan] = true if generic_plan
+
+          if explain_options[:analyze] && !@explain_analyze_enabled
+            render_text "Explain analyze not enabled", status: :bad_request
+            return
+          end
+
+          @explanation = @database.explain(@query, **explain_options)
           @suggested_index = @database.suggested_indexes(queries: [@query]).first if @database.suggested_indexes_enabled?
           @visualize = params[:commit] == "Visualize"
         rescue ActiveRecord::StatementInvalid => e
-          @error = e.message
-
-          if @error.include?("bind message supplies 0 parameters")
-            @error = "Can't explain queries with bind parameters"
-          end
+          message = e.message
+          @error =
+            if message == "Unsafe statement"
+              "Unsafe statement"
+            elsif message.start_with?("PG::UndefinedParameter")
+              "Can't explain queries with bind parameters"
+            elsif message.include?("EXPLAIN options ANALYZE and GENERIC_PLAN cannot be used together")
+              "Can't analyze queries with bind parameters"
+            elsif message.start_with?("PG::SyntaxError")
+              "Syntax error with query"
+            elsif message.start_with?("PG::QueryCanceled")
+              "Query timed out"
+            else
+              # default to a generic message
+              # since data can be extracted through the Postgres error message
+              "Error explaining query"
+            end
         end
       end
     end
@@ -306,7 +377,7 @@ module PgHero
       @connections_by_database = group_connections_by_key(connections, :database)
       @connections_by_user = group_connections_by_key(connections, :user)
 
-      if params[:security] && @database.server_version_num >= 90500
+      if params[:security]
         connections.each do |connection|
           connection[:ssl_status] =
             if connection[:ssl]
@@ -344,21 +415,27 @@ module PgHero
     end
 
     def kill
-      if @database.kill(params[:pid])
+      if @database.kill(params[:pid].to_i, key: params[:key].to_i)
         redirect_backward notice: "Query killed"
       else
         redirect_backward notice: "Query no longer running"
       end
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill this query"
     end
 
     def kill_long_running_queries
       @database.kill_long_running_queries
       redirect_backward notice: "Queries killed"
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill some queries"
     end
 
     def kill_all
       @database.kill_all
       redirect_backward notice: "Connections killed"
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill some connections"
     end
 
     def enable_query_stats
@@ -369,15 +446,24 @@ module PgHero
     end
 
     def reset_query_stats
-      @database.reset_query_stats
-      redirect_backward notice: "Query stats reset"
-    rescue ActiveRecord::StatementInvalid
-      redirect_backward alert: "The database user does not have permission to reset query stats"
+      # also disable when upgrading
+      if @database.historical_query_stats_enabled? || @database.query_stats_table_exists?
+        render_text "Cannot reset when historical query stats are enabled", status: :bad_request
+        return
+      end
+
+      success = @database.reset_query_stats
+
+      if success
+        redirect_backward notice: "Query stats reset"
+      else
+        redirect_backward alert: "The database user does not have permission to reset query stats"
+      end
     end
 
     protected
 
-    def redirect_backward(options = {})
+    def redirect_backward(**options)
       redirect_back fallback_location: root_path, **options
     end
 
@@ -401,17 +487,23 @@ module PgHero
       @query_stats_enabled = @database.query_stats_enabled?
       @system_stats_enabled = @database.system_stats_enabled?
       @replica = @database.replica?
+      @explain_enabled = PgHero.explain_enabled?
+      @kill_enabled = PgHero.kill_enabled?
     end
 
     def set_suggested_indexes(min_average_time = 0, min_calls = 0)
+      if @database.suggested_indexes_enabled? && !@indexes
+        @indexes, @indexes_timeout = rescue_timeout([]) { @database.indexes }
+      end
+
       @suggested_indexes_by_query =
-        if @database.suggested_indexes_enabled?
-          @database.suggested_indexes_by_query(query_stats: @query_stats.select { |qs| qs[:average_time] >= min_average_time && qs[:calls] >= min_calls })
+        if !@indexes_timeout && @database.suggested_indexes_enabled?
+          @database.suggested_indexes_by_query(query_stats: @query_stats.select { |qs| qs[:average_time] >= min_average_time && qs[:calls] >= min_calls }, indexes: @indexes)
         else
           {}
         end
 
-      @suggested_indexes = @database.suggested_indexes(suggested_indexes_by_query: @suggested_indexes_by_query, indexes: @indexes)
+      @suggested_indexes = @database.suggested_indexes(suggested_indexes_by_query: @suggested_indexes_by_query)
       @query_stats_by_query = @query_stats.index_by { |q| q[:query] }
       @debug = params[:debug].present?
     end
@@ -430,7 +522,7 @@ module PgHero
 
     def set_show_details
       @historical_query_stats_enabled = @query_stats_enabled && @database.historical_query_stats_enabled?
-      @show_details = @historical_query_stats_enabled && @database.supports_query_hash?
+      @show_details = @historical_query_stats_enabled
     end
 
     def group_connections(connections, keys)
@@ -441,22 +533,43 @@ module PgHero
     end
 
     def group_connections_by_key(connections, key)
-      group_connections(connections, [key]).map { |v| [v[key], v[:total_connections]] }.to_h
+      group_connections(connections, [key]).to_h { |v| [v[key], v[:total_connections]] }
     end
 
     def check_api
-      render_text "No support for Rails API. See https://github.com/pghero/pghero for a standalone app." if Rails.application.config.try(:api_only)
+      if Rails.application.config.try(:api_only)
+        render_text "No support for Rails API. See https://github.com/pghero/pghero for a standalone app.", status:  :internal_server_error
+      end
     end
 
-    # TODO return error status code
-    def render_text(message)
-      render plain: message
+    def check_server_version
+      if @database.server_version_num < 140000
+        render_text "Requires PostgreSQL 14+", status: :internal_server_error
+      end
+    end
+
+    def render_text(message, status:)
+      render plain: message, status: status
     end
 
     def ensure_query_stats
       unless @query_stats_enabled
         redirect_to root_path, alert: "Query stats not enabled"
       end
+    end
+
+    def ensure_kill_enabled
+      unless @kill_enabled
+        render_text "Kill not enabled", status: :bad_request
+      end
+    end
+
+    # rescue QueryCanceled for case when
+    # statement timeout is less than lock timeout
+    def rescue_timeout(default)
+      [yield, false]
+    rescue ActiveRecord::LockWaitTimeout, ActiveRecord::QueryCanceled
+      [default, true]
     end
   end
 end

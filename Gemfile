@@ -2,11 +2,10 @@ source "https://rubygems.org"
 
 gemspec
 
-gem "minitest", ">= 5"
 gem "rake"
-
-gem "activerecord", "~> 6.1.0"
-gem "activerecord-import"
+gem "minitest"
+gem "activerecord", "~> 8.1.0"
 gem "combustion"
 gem "pg"
-gem "pg_query"
+gem "pg_query", platform: [:ruby, :windows]
+gem "tzinfo-data", platform: :windows

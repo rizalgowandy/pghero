@@ -14,7 +14,7 @@ Start the dashboard:
 docker run -ti -e DATABASE_URL=postgres://user:password@hostname:5432/dbname -p 8080:8080 ankane/pghero
 ```
 
-Use URL-encoding for any special characters in the username or password. On Mac and Windows, use `host.docker.internal` as the database hostname for databases on your local machine.
+Use URL-encoding for any special characters in the username or password. For databases on the host machine, use `host.docker.internal` as the hostname (on Linux, this requires `--add-host=host.docker.internal:host-gateway`).
 
 Then visit [http://localhost:8080](http://localhost:8080).
 
@@ -37,17 +37,23 @@ Query stats can be enabled from the dashboard. If you run into issues, [view the
 To track query stats over time, create a table to store them.
 
 ```sql
-CREATE TABLE "pghero_query_stats" (
-  "id" bigserial primary key,
-  "database" text,
-  "user" text,
-  "query" text,
-  "query_hash" bigint,
-  "total_time" float,
-  "calls" bigint,
-  "captured_at" timestamp
+CREATE TABLE pghero_queries (
+    id bigserial PRIMARY KEY,
+    query text
 );
-CREATE INDEX ON "pghero_query_stats" ("database", "captured_at");
+CREATE INDEX ON pghero_queries USING hash (query);
+
+CREATE TABLE pghero_query_stats (
+    id bigserial PRIMARY KEY,
+    database text,
+    "user" text,
+    query_id bigint,
+    query_hash bigint,
+    total_time float,
+    calls bigint,
+    captured_at timestamp
+);
+CREATE INDEX ON pghero_query_stats (database, captured_at);
 ```
 
 This table can be in the current database or another database. If another database, pass the `PGHERO_STATS_DATABASE_URL` environment variable with commands.
@@ -60,10 +66,10 @@ docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:capture_query_s
 
 After this, a time range slider will appear on the Queries tab.
 
-The query stats table can grow large over time. Remove old stats with:
+Remove old stats with:
 
 ```sh
-docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:clean_query_stats
+docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:clean_query_stats KEEP_DAYS=14
 ```
 
 ## Historical Space Stats
@@ -71,15 +77,15 @@ docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:clean_query_sta
 To track space stats over time, create a table to store them.
 
 ```sql
-CREATE TABLE "pghero_space_stats" (
-  "id" bigserial primary key,
-  "database" text,
-  "schema" text,
-  "relation" text,
-  "size" bigint,
-  "captured_at" timestamp
+CREATE TABLE pghero_space_stats (
+    id bigserial PRIMARY KEY,
+    database text,
+    schema text,
+    relation text,
+    size bigint,
+    captured_at timestamp
 );
-CREATE INDEX ON "pghero_space_stats" ("database", "captured_at");
+CREATE INDEX ON pghero_space_stats (database, captured_at);
 ```
 
 Schedule the task below to run once a day.
@@ -88,15 +94,18 @@ Schedule the task below to run once a day.
 docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:capture_space_stats
 ```
 
+Remove old stats with:
+
+```sh
+docker run -ti -e DATABASE_URL=... ankane/pghero bin/rake pghero:clean_space_stats KEEP_DAYS=90
+```
+
 ## System Stats
 
 CPU usage, IOPS, and other stats are available for:
 
 - [Amazon RDS](#amazon-rds)
 - [Google Cloud SQL](#google-cloud-sql)
-- [Azure Database](#azure-database)
-
-Heroku and Digital Ocean do not currently have an API for database metrics.
 
 ### Amazon RDS
 
@@ -135,25 +144,6 @@ PGHERO_GCP_DATABASE_ID=my-project:my-instance
 
 This requires the Monitoring Viewer role.
 
-### Azure Database
-
-[Get your credentials](https://docs.microsoft.com/en-us/azure/active-directory/develop/howto-create-service-principal-portal) and add these variables to your environment:
-
-```sh
-AZURE_TENANT_ID=...
-AZURE_CLIENT_ID=...
-AZURE_CLIENT_SECRET=...
-AZURE_SUBSCRIPTION_ID=...
-```
-
-Finally, set your database resource URI:
-
-```sh
-PGHERO_AZURE_RESOURCE_ID=/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.DBforPostgreSQL/servers/<database-id>
-```
-
-This requires the Monitoring Reader role.
-
 ## Customization & Multiple Databases
 
 Create a `pghero.yml` file with:
@@ -166,7 +156,6 @@ databases:
     # System stats
     # aws_db_instance_identifier: my-instance
     # gcp_database_id: my-project:my-instance
-    # azure_resource_id: my-resource-id
 
   # Add more databases
   # other:
@@ -184,8 +173,14 @@ databases:
 # Minimum connections for high connections warning
 # total_connections_threshold: 500
 
+# Explain functionality
+# explain: true / false / analyze
+
 # Statement timeout for explain
 # explain_timeout_sec: 10
+
+# Visualize URL for explain
+# visualize_url: https://...
 
 # Time zone
 # time_zone: "Pacific Time (US & Canada)"
@@ -203,17 +198,6 @@ And build your image:
 
 ```sh
 docker build -t my-pghero .
-```
-
-If multiple databases are in the same instance and use historical query stats, PgHero should be configured to capture them together.
-
-```yml
-databases:
-  primary:
-    url: ...
-  other:
-    url: ...
-    capture_query_stats: primary
 ```
 
 ## Deployment
@@ -254,8 +238,14 @@ data:
     # Minimum connections for high connections warning
     # total_connections_threshold: 500
 
+    # Explain functionality
+    # explain: true / false / analyze
+
     # Statement timeout for explain
     # explain_timeout_sec: 10
+
+    # Visualize URL for explain
+    # visualize_url: https://...
 
     # Time zone
     # time_zone: "Pacific Time (US & Canada)"
@@ -300,6 +290,32 @@ spec:
 ## Permissions
 
 We recommend [setting up a dedicated user](Permissions.md) for PgHero.
+
+## Upgrading
+
+### 4.0
+
+If historical query stats are enabled, run:
+
+```sql
+CREATE TABLE pghero_queries (
+    id bigserial PRIMARY KEY,
+    query text
+);
+CREATE INDEX ON pghero_queries USING hash (query);
+
+ALTER TABLE pghero_query_stats ADD COLUMN query_id bigint;
+
+INSERT INTO pghero_queries (query)
+    SELECT DISTINCT query FROM pghero_query_stats WHERE query IS NOT NULL;
+
+UPDATE pghero_query_stats SET query_id = pghero_queries.id, query = NULL
+    FROM pghero_queries WHERE pghero_queries.query = pghero_query_stats.query;
+
+ALTER TABLE pghero_query_stats DROP COLUMN query;
+
+VACUUM (FULL, ANALYZE) pghero_query_stats;
+```
 
 ## Credits
 

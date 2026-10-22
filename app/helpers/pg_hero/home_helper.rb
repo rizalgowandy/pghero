@@ -5,15 +5,15 @@ module PgHero
       if schema && schema != "public"
         ident = "#{schema}.#{table}"
       end
-      if ident =~ /\A[a-z0-9_]+\z/
+      if /\A[a-z0-9_]+\z/.match?(ident)
         ident
       else
         @database.quote_ident(ident)
       end
     end
 
-    def pghero_js_var(name, value)
-      "var #{name} = #{json_escape(value.to_json(root: false))};".html_safe
+    def pghero_js_value(value)
+      json_escape(value.to_json(root: false)).html_safe
     end
 
     def pghero_remove_index(query)

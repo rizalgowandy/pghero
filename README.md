@@ -4,20 +4,21 @@ A performance dashboard for Postgres
 
 [See it in action](https://pghero.dokkuapp.com/)
 
-[![Screenshot](https://pghero.dokkuapp.com/assets/pghero-ebb9c8e11434fd0e4ead81db88fe255b29cbbc845ec315b79e6c5e25015bc921.png)](https://pghero.dokkuapp.com/)
+[![Screenshot](https://pghero.dokkuapp.com/assets/pghero-88a0d052.png)](https://pghero.dokkuapp.com/)
+
+**PgHero 4.0 was recently released** - see how to upgrade [Docker](guides/Docker.md#upgrading) or [Rails](guides/Rails.md#upgrading)
 
 :tangerine: Battle-tested at [Instacart](https://www.instacart.com/opensource)
 
-[![Build Status](https://github.com/ankane/pghero/workflows/build/badge.svg?branch=master)](https://github.com/ankane/pghero/actions) [![Docker Pulls](https://img.shields.io/docker/pulls/ankane/pghero)](https://hub.docker.com/repository/docker/ankane/pghero)
+[![Build Status](https://github.com/ankane/pghero/actions/workflows/build.yml/badge.svg)](https://github.com/ankane/pghero/actions)
 
 ## Documentation
 
-PgHero is available as a Docker image, Linux package, and Rails engine.
+PgHero is available as a Docker image and Rails engine.
 
 Select your preferred method of installation to get started.
 
 - [Docker](guides/Docker.md)
-- [Linux](guides/Linux.md)
 - [Rails](guides/Rails.md)
 
 ## Related Projects
@@ -29,7 +30,7 @@ Select your preferred method of installation to get started.
 
 ## Credits
 
-A big thanks to [Craig Kerstiens](http://www.craigkerstiens.com/2013/01/10/more-on-postgres-performance/) and [Heroku](https://blog.heroku.com/archives/2013/5/10/more_insight_into_your_database_with_pgextras) for the initial queries and [Bootswatch](https://github.com/thomaspark/bootswatch) for the theme.
+A big thanks to [Craig Kerstiens](https://www.craigkerstiens.com/2013/01/10/more-on-postgres-performance/) and [Heroku](https://blog.heroku.com/archives/2013/5/10/more_insight_into_your_database_with_pgextras) for the initial queries and [Bootswatch](https://github.com/thomaspark/bootswatch) for the theme.
 
 ## History
 

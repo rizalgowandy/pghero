@@ -31,27 +31,55 @@ module PgHero
       end
 
       def quote_ident(value)
-        connection.quote_column_name(value)
+        with_connection { |c| c.quote_column_name(value) }
       end
 
       private
 
-      def select_all(sql, conn: nil, query_columns: [])
-        conn ||= connection
+      def prepare_sql(sql, binds = nil, stats: false)
+        if binds && !binds.empty?
+          model = stats ? PgHero::Stats : connection_model
+          sql = model.sanitize_sql_array([sql, binds])
+        end
+
+        with_connection(stats: stats) do |conn|
+          yield conn, sql
+        end
+      end
+
+      def select_all(sql, binds = nil, stats: false, query_columns: [])
         # squish for logs
+        prepare_sql(sql.to_str.squish, binds, stats: stats) do |conn, sql|
+          select_all_leased(sql, conn: conn, query_columns: query_columns)
+        end
+      end
+
+      def select_all_leased(sql, conn:, query_columns:)
         retries = 0
         begin
-          result = conn.select_all(add_source(squish(sql)))
-          if ActiveRecord::VERSION::STRING.to_f >= 6.1
-            result = result.map(&:symbolize_keys)
+          result = conn.select_all(sql)
+          if ActiveRecord::VERSION::MAJOR >= 8
+            result = result.to_a.map(&:symbolize_keys)
           else
-            result = result.map { |row| Hash[row.map { |col, val| [col.to_sym, result.column_types[col].send(:cast_value, val)] }] }
+            result = result.map(&:symbolize_keys)
           end
           if filter_data
             query_columns.each do |column|
               result.each do |row|
+                value = row[column]
+                if value.nil? || value == "<insufficient privilege>"
+                  next
+                end
+
+                if value.start_with?("autovacuum:")
+                  prefix = "autovacuum:"
+                  value = value.delete_prefix("autovacuum:")
+                else
+                  prefix = ""
+                end
+
                 begin
-                  row[column] = PgQuery.normalize(row[column])
+                  row[column] = prefix + PgQuery.normalize(value)
                 rescue PgQuery::ParseError
                   # try replacing "interval $1" with "$1::interval"
                   # see https://github.com/lfittl/pg_query/issues/169 for more info
@@ -59,7 +87,7 @@ module PgHero
                   # we could skip normalization
                   # but this has a very small chance of data leakage
                   begin
-                    row[column] = PgQuery.normalize(row[column].gsub(/\binterval\s+(\$\d+)\b/i, "\\1::interval"))
+                    row[column] = prefix + PgQuery.normalize(value.gsub(/\binterval\s+(\$\d+)\b/i, "\\1::interval"))
                   rescue PgQuery::ParseError
                     row[column] = "<unable to filter data>"
                   end
@@ -80,59 +108,39 @@ module PgHero
         end
       end
 
-      def select_all_stats(sql, **options)
-        select_all(sql, **options, conn: stats_connection)
+      def select_all_stats(sql, binds = nil, **options)
+        select_all(sql, binds, **options, stats: true)
       end
 
-      def select_all_size(sql)
-        result = select_all(sql)
+      def select_all_size(sql, binds = nil)
+        result = select_all(sql, binds)
         result.each do |row|
           row[:size] = PgHero.pretty_size(row[:size_bytes])
         end
         result
       end
 
-      def select_one(sql, conn: nil)
-        select_all(sql, conn: conn).first.values.first
+      def select_one(sql, binds = nil)
+        select_all(sql, binds).first&.values&.first
       end
 
-      def select_one_stats(sql)
-        select_one(sql, conn: stats_connection)
+      def execute(sql, binds = nil)
+        prepare_sql(sql, binds) do |conn, sql|
+          conn.execute(sql)
+        end
       end
 
-      def execute(sql)
-        connection.execute(add_source(sql))
-      end
-
-      def connection
-        connection_model.connection
-      end
-
-      def stats_connection
-        ::PgHero::Stats.connection
-      end
-
-      def insert_stats(table, columns, values)
-        values = values.map { |v| "(#{v.map { |v2| quote(v2) }.join(",")})" }.join(",")
-        columns = columns.map { |v| quote_table_name(v) }.join(",")
-        stats_connection.execute("INSERT INTO #{quote_table_name(table)} (#{columns}) VALUES #{values}")
-      end
-
-      # from ActiveSupport
-      def squish(str)
-        str.to_s.gsub(/\A[[:space:]]+/, "").gsub(/[[:space:]]+\z/, "").gsub(/[[:space:]]+/, " ")
-      end
-
-      def add_source(sql)
-        "#{sql} /*pghero*/"
-      end
-
-      def quote(value)
-        connection.quote(value)
+      def with_connection(stats: false, &block)
+        model = stats ? PgHero::Stats : connection_model
+        model.connection_pool.with_connection(&block)
       end
 
       def quote_table_name(value)
-        connection.quote_table_name(value)
+        with_connection { |c| c.quote_table_name(value) }
+      end
+
+      def quote_column_name(value)
+        with_connection { |c| c.quote_column_name(value) }
       end
 
       def unquote(part)
@@ -145,15 +153,15 @@ module PgHero
 
       def with_transaction(lock_timeout: nil, statement_timeout: nil, rollback: false)
         connection_model.transaction do
-          select_all "SET LOCAL statement_timeout = #{statement_timeout.to_i}" if statement_timeout
-          select_all "SET LOCAL lock_timeout = #{lock_timeout.to_i}" if lock_timeout
+          select_all("SET LOCAL statement_timeout = :timeout", {timeout: statement_timeout.to_i}) if statement_timeout
+          select_all("SET LOCAL lock_timeout = :timeout", {timeout: lock_timeout.to_i}) if lock_timeout
           yield
           raise ActiveRecord::Rollback if rollback
         end
       end
 
       def table_exists?(table)
-        stats_connection.table_exists?(table)
+        with_connection(stats: true) { |c| c.table_exists?(table) }
       end
     end
   end

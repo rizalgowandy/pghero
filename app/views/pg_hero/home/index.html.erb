@@ -26,9 +26,6 @@
     <% if @autovacuum_queries.any? %>
       <span class="tiny"><%= @autovacuum_queries.size %> autovacuum</span>
     <% end %>
-    <% if @walsender_queries.any? %>
-      <span class="tiny"><%= @walsender_queries.size %> walsender</span>
-    <% end %>
   </div>
   <% if @extended %>
     <div class="alert alert-<%= @good_cache_rate ? "success" : "warning" %>">
@@ -55,9 +52,11 @@
       Vacuuming healthy
     <% end %>
   </div>
-  <div class="alert alert-<%= @sequence_danger && @sequence_danger.empty? ? "success" : "warning" %>">
+  <div class="alert alert-<%= @sequence_danger && @sequence_danger.empty? && !@sequences_timeout ? "success" : "warning" %>">
     <% if @sequence_danger.any? %>
       <%= pluralize(@sequence_danger.size, "column") %> approaching overflow
+    <% elsif @sequences_timeout %>
+      Sequences not available (system catalog locked)
     <% else %>
       No columns near integer overflow
     <% end %>
@@ -66,7 +65,7 @@
     <% end %>
   </div>
   <div class="alert alert-<%= @invalid_indexes.empty? && @invalid_constraints.empty? ? "success" : "warning" %>">
-    <% if @invalid_indexes.empty? && @invalid_constraints.empty?  %>
+    <% if @invalid_indexes.empty? && @invalid_constraints.empty? %>
       No invalid indexes or constraints
     <% else %>
       <% if @invalid_indexes.any? %>
@@ -125,7 +124,7 @@
     <table class="table">
       <thead>
         <tr>
-          <th style="width: 33%;">Column</th>
+          <th class="width-33">Column</th>
           <th>Sequence</th>
         </tr>
       </thead>
@@ -168,7 +167,7 @@
     <h1>Inactive Replication Slots</h1>
     <p>Inactive replication slots can cause a lot of disk space to be consumed.</p>
     <p>For each, run:</p>
-    <pre><code>SELECT pg_drop_replication_slot('slot_name');</code></pre>
+    <pre><code class="language-pgsql">SELECT pg_drop_replication_slot('slot_name');</code></pre>
     <table class="table">
       <thead>
         <tr>
@@ -188,12 +187,14 @@
 
 <% if @long_running_queries.any? %>
   <div class="content">
-    <%= button_to "Kill All", kill_long_running_queries_path, class: "btn btn-danger", style: "float: right;" %>
+    <% if @kill_enabled %>
+      <%= button_to "Kill All", kill_long_running_queries_path, class: "btn btn-danger push-right" %>
+    <% end %>
     <h1>Long Running Queries</h1>
 
     <p>We recommend setting a statement timeout on all non-superusers with:</p>
 
-    <pre><code>ALTER ROLE &lt;user&gt; SET statement_timeout TO '60s';</code></pre>
+    <pre><code class="language-pgsql">ALTER ROLE &lt;user&gt; SET statement_timeout TO '60s';</code></pre>
 
     <%= render partial: "live_queries_table", locals: {queries: @long_running_queries, vacuum_progress: {}} %>
   </div>
@@ -244,12 +245,12 @@
     <p>Try <%= link_to "tuning autovacuum", "https://blog.2ndquadrant.com/autovacuum-tuning-basics/", target: "_blank" %> - specifically autovacuum_vacuum_cost_limit.</p>
 
     <p>If that doesn’t work, for each table, run:</p>
-    <pre><code>VACUUM FREEZE VERBOSE table;</code></pre>
+    <pre><code class="language-pgsql">VACUUM FREEZE VERBOSE table;</code></pre>
     <table class="table">
       <thead>
         <tr>
           <th>Table</th>
-          <th style="width: 20%;">Transactions Left</th>
+          <th class="width-20">Transactions Left</th>
         </tr>
       </thead>
       <tbody>
@@ -277,9 +278,9 @@
       <thead>
         <tr>
           <th>Column</th>
-          <th style="width: 20%;">Type</th>
-          <th style="width: 20%;">Values Left</th>
-          <th style="width: 10%;">% Left</th>
+          <th class="width-20">Type</th>
+          <th class="width-20">Values Left</th>
+          <th class="width-10">% Left</th>
         </tr>
       </thead>
       <tbody>
@@ -330,8 +331,8 @@
             </td>
           </tr>
           <tr>
-            <td style="border-top: none; padding: 0;">
-              <pre><code>DROP INDEX CONCURRENTLY <%= pghero_pretty_ident(index[:name], schema: index[:schema]) %>;
+            <td class="query-row">
+              <pre><code class="language-pgsql">DROP INDEX CONCURRENTLY <%= pghero_pretty_ident(index[:name], schema: index[:schema]) %>;
 <%= index[:definition].sub("CREATE INDEX ", "CREATE INDEX CONCURRENTLY ") %>;</code></pre>
             </td>
           </tr>
@@ -364,8 +365,8 @@
             </td>
           </tr>
           <tr>
-            <td style="border-top: none; padding: 0;">
-              <pre><code>ALTER TABLE <%= pghero_pretty_ident(constraint[:table], schema: constraint[:schema]) %> VALIDATE CONSTRAINT <%= pghero_pretty_ident(constraint[:name]) %>;</code></pre>
+            <td class="query-row">
+              <pre><code class="language-pgsql">ALTER TABLE <%= pghero_pretty_ident(constraint[:table], schema: constraint[:schema]) %> VALIDATE CONSTRAINT <%= pghero_pretty_ident(constraint[:name]) %>;</code></pre>
             </td>
           </tr>
         <% end %>
@@ -381,16 +382,15 @@
     <p>
       These indexes exist, but aren’t needed. Remove them
       <% if @show_migrations %>
-      <a href="javascript: void(0);" onclick="document.getElementById('migration2').style.display = 'block';">with a migration</a>
+      <a href="#" class="migration-link">with a migration</a>
       <% end %>
       for faster writes.
     </p>
 
-    <div id="migration2" style="display: none;">
-      <pre>rails generate migration remove_unneeded_indexes</pre>
+    <div class="migration">
+      <pre><code>rails generate migration remove_unneeded_indexes</code></pre>
       <p>And paste</p>
-      <pre style="overflow: scroll; white-space: pre; word-break: normal;"><% @duplicate_indexes.each do |query| %>
-<%= pghero_remove_index(query[:unneeded_index]) %><% end %></pre>
+      <pre><code><%= @duplicate_indexes.map { |q| pghero_remove_index(q[:unneeded_index]) }.join("\n") %></code></pre>
     </div>
 
     <table class="table duplicate-indexes">
@@ -424,20 +424,20 @@
       Add indexes to speed up queries.
       <% if @show_migrations %>
       Here’s a
-      <a href="javascript: void(0);" onclick="document.getElementById('migration3').style.display = 'block';">migration</a> to help.
+      <a href="#" class="migration-link">migration</a> to help.
       <% end %>
     </p>
 
-    <div id="migration3" style="display: none;">
-      <pre>rails generate migration add_suggested_indexes</pre>
+    <div class="migration">
+      <pre><code>rails generate migration add_suggested_indexes</code></pre>
       <p>And paste</p>
-      <pre style="overflow: scroll; white-space: pre; word-break: normal;">commit_db_transaction
+      <pre><code>commit_db_transaction
 <% @suggested_indexes.each do |index| %>
 <% if index[:using] && index[:using] != "btree" %>
 add_index <%= index[:table].to_sym.inspect %>, <%= index[:columns].first.inspect %>, using: <%= index[:using].inspect %>, algorithm: :concurrently
 <% else %>
 add_index <%= index[:table].to_sym.inspect %>, [<%= index[:columns].map(&:to_sym).map(&:inspect).join(", ") %>], algorithm: :concurrently<% end %>
-<% end %></pre>
+<% end %></code></pre>
     </div>
 
     <% @suggested_indexes.each_with_index do |index, i| %>
@@ -459,9 +459,8 @@ add_index <%= index[:table].to_sym.inspect %>, [<%= index[:columns].map(&:to_sym
         <%= button_to "Enable", enable_query_stats_path, class: "btn btn-info" %>
       </p>
     <% else %>
-      <p>Make them available by adding the following lines to <code>postgresql.conf</code>:</p>
-      <pre>shared_preload_libraries = 'pg_stat_statements'
-pg_stat_statements.track = all</pre>
+      <p>Make them available by adding the following line to <code>postgresql.conf</code>:</p>
+      <pre><code>shared_preload_libraries = 'pg_stat_statements'</code></pre>
       <p>Restart the server for the changes to take effect.</p>
     <% end %>
   </div>
@@ -485,23 +484,22 @@ pg_stat_statements.track = all</pre>
     <p>
       Unused indexes cause unnecessary overhead. Remove them
       <% if @show_migrations %>
-        <a href="javascript: void(0);" onclick="document.getElementById('migration').style.display = 'block';">with a migration</a>
+        <a href="#" class="migration-link">with a migration</a>
       <% end %>
       for faster writes.
     </p>
 
-    <div id="migration" style="display: none;">
-      <pre>rails generate migration remove_unused_indexes</pre>
+    <div class="migration">
+      <pre><code>rails generate migration remove_unused_indexes</code></pre>
       <p>And paste</p>
-      <pre style="overflow: scroll; white-space: pre; word-break: normal;"><% @unused_indexes.each do |query| %>
-<%= pghero_remove_index(query)%><% end %></pre>
+      <pre><code><%= @unused_indexes.map { |q| pghero_remove_index(q) }.join("\n") %></code></pre>
     </div>
 
     <table class="table">
       <thead>
         <tr>
           <th>Name</th>
-          <th style="width: 20%;">Index Size</th>
+          <th class="width-20">Index Size</th>
         </tr>
       </thead>
       <tbody>
@@ -516,6 +514,6 @@ pg_stat_statements.track = all</pre>
   </div>
 <% end %>
 
-<script>
+<%= javascript_tag nonce: true do %>
   highlightQueries();
-</script>
+<% end %>

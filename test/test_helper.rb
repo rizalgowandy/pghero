@@ -2,22 +2,116 @@ require "bundler/setup"
 require "combustion"
 Bundler.require(:default)
 require "minitest/autorun"
-require "minitest/pride"
-require "pg_query"
-require "activerecord-import"
 
 class Minitest::Test
   def database
     @database ||= PgHero.databases[:primary]
   end
+
+  def with_config(value)
+    PgHero.config.merge!(value)
+    yield
+  ensure
+    PgHero.remove_instance_variable(:@config)
+  end
+
+  def with_explain(value, &block)
+    with_config({"explain" => value}, &block)
+  end
+
+  def with_explain_timeout(value)
+    previous_value = PgHero.explain_timeout_sec
+    begin
+      PgHero.explain_timeout_sec = value
+      yield
+    ensure
+      PgHero.explain_timeout_sec = previous_value
+    end
+  end
+
+  def with_disable_kill(&block)
+    with_config({"disable_kill" => true}, &block)
+  end
+
+  def with_filter_data
+    previous_value = PgHero.filter_data
+    begin
+      PgHero.filter_data = true
+      database.remove_instance_variable(:@filter_data) if database.instance_variable_defined?(:@filter_data)
+      yield
+    ensure
+      PgHero.filter_data = previous_value
+      database.remove_instance_variable(:@filter_data)
+    end
+  end
+
+  def with_running_query(query)
+    stopping = false
+    t =
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do |connection|
+          begin
+            connection.execute(query)
+          rescue ActiveRecord::QueryCanceled => e
+            raise e unless stopping
+          end
+        end
+      end
+    t.report_on_exception = false
+    # TODO ensure query started
+    sleep(0.05)
+    yield
+    stopping = true
+    database.send(:execute, "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query = ?", [query])
+    t.join
+  end
+
+  def explain_normalized?
+    database.server_version_num >= 160000
+  end
+
+  def assert_kills
+    error = assert_raises(ActiveRecord::ConnectionFailed) do
+      yield
+    end
+    assert_match "terminating connection due to administrator command", error.message
+  end
 end
 
-logger = ActiveSupport::Logger.new(ENV["VERBOSE"] ? STDERR : nil)
+def ractorize?
+  ENV["RACTORIZE"]
+end
+
+if ractorize?
+  ActiveSupport::Ractors.unshareable_proc_action = :warn
+
+  # https://github.com/rails/rails/issues/59152
+  PgHero::Engine.instance.env_config
+end
+
+logger_class = ractorize? ? ActiveSupport::Ractors::Logger : ActiveSupport::Logger
+logger = logger_class.new(ENV["VERBOSE"] ? STDERR : nil)
 
 Combustion.path = "test/internal"
 Combustion.initialize! :active_record, :action_controller do
+  config.load_defaults Rails::VERSION::STRING.to_f
   config.action_controller.logger = logger
   config.active_record.logger = logger
+
+  if ractorize?
+    config.eager_load = true
+    config.logger = logger
+    config.consider_all_requests_local = false
+  end
+end
+
+if ractorize?
+  # https://github.com/rails/rails/issues/59168
+  Rails.application.singleton_class.class_eval do
+    def reload_routes_unless_loaded = true
+  end
+
+  Rails.application.ractorize!
 end
 
 class City < ActiveRecord::Base
@@ -35,7 +129,7 @@ states =
       name: "State #{i}"
     }
   end
-State.import states, validate: false
+State.insert_all!(states)
 ActiveRecord::Base.connection.execute("ANALYZE states")
 
 users =
@@ -51,9 +145,10 @@ users =
       tree_path: "path#{rand(30)}",
       range: (0..rand(5)),
       metadata: {favorite_color: "red"},
-      created_at: Time.now - rand(50).days,
-      updated_at: Time.now - rand(50).days
+      created_at: Time.now - i.seconds,
+      updated_at: Time.now - i.seconds
     }
   end
-User.import users, validate: false
+User.insert_all!(users)
 ActiveRecord::Base.connection.execute("ANALYZE users")
+ActiveRecord::Base.connection.execute("CREATE MATERIALIZED VIEW all_users AS SELECT * FROM users")

@@ -3,17 +3,19 @@ module PgHero
     module Settings
       def settings
         names =
-          if server_version_num >= 90500
+          if server_version_num >= 180000
             %i(
-              max_connections shared_buffers effective_cache_size work_mem
-              maintenance_work_mem min_wal_size max_wal_size checkpoint_completion_target
-              wal_buffers default_statistics_target
+              max_connections shared_buffers effective_cache_size maintenance_work_mem
+              checkpoint_completion_target wal_buffers default_statistics_target
+              random_page_cost effective_io_concurrency work_mem huge_pages
+              jit wal_compression io_method min_wal_size max_wal_size
             )
           else
             %i(
-              max_connections shared_buffers effective_cache_size work_mem
-              maintenance_work_mem checkpoint_segments checkpoint_completion_target
-              wal_buffers default_statistics_target
+              max_connections shared_buffers effective_cache_size maintenance_work_mem
+              checkpoint_completion_target wal_buffers default_statistics_target
+              random_page_cost effective_io_concurrency work_mem huge_pages
+              jit wal_compression min_wal_size max_wal_size
             )
           end
         fetch_settings(names)
@@ -30,7 +32,7 @@ module PgHero
       private
 
       def fetch_settings(names)
-        Hash[names.map { |name| [name, select_one("SHOW #{name}")] }]
+        names.to_h { |name| [name, select_one("SHOW #{name}")] }
       end
     end
   end

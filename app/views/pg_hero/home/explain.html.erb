@@ -4,17 +4,20 @@
   <%= form_tag explain_path do %>
     <div class="field"><%= text_area_tag :query, @query, placeholder: "Enter a SQL query" %></div>
     <p>
-      <%= submit_tag "Explain", class: "btn btn-info", style: "margin-right: 10px;" %>
-      <%= submit_tag "Analyze", class: "btn btn-danger", style: "margin-right: 10px;" %>
+      <%= submit_tag "Explain", class: "btn btn-info right-5" %>
+      <% if @explain_analyze_enabled %>
+        <%= submit_tag "Analyze", class: "btn btn-danger right-5" %>
+      <% end %>
       <%= submit_tag "Visualize", class: "btn btn-danger" %>
     </p>
   <% end %>
 
   <% if @explanation %>
     <% if @visualize %>
-      <p>Paste the output below into the <%= link_to "Postgres Explain Visualizer", "https://tatiyants.com/pev/#/plans/new", target: "_blank" %></p>
+      <p>Paste the output below into the <%= link_to "explain visualizer", PgHero.visualize_url, target: "_blank" %></p>
+      <button id="copy" class="btn btn-info hide">Copy</button>
     <% end %>
-    <pre><code><%= @explanation %></code></pre>
+    <pre><code id="explanation"><%= @explanation %></code></pre>
     <% unless @visualize %>
       <p><%= link_to "See how to interpret this", "https://www.postgresql.org/docs/current/static/using-explain.html", target: "_blank" %></p>
     <% end %>

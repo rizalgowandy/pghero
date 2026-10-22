@@ -16,7 +16,6 @@ module PgHero
     include Methods::SuggestedIndexes
     include Methods::System
     include Methods::Tables
-    include Methods::Users
 
     attr_reader :id, :config
 
@@ -62,9 +61,12 @@ module PgHero
       (config["long_running_query_sec"] || PgHero.config["long_running_query_sec"] || PgHero.long_running_query_sec).to_i
     end
 
-    # defaults to 100 megabytes
+    def unused_index_bytes
+      ((config["unused_index_megabytes"] || PgHero.config["unused_index_megabytes"] || 10).to_f * 1.megabyte).to_i
+    end
+
     def index_bloat_bytes
-      (config["index_bloat_bytes"] || PgHero.config["index_bloat_bytes"] || 104857600).to_i
+      (config["index_bloat_bytes"] || PgHero.config["index_bloat_bytes"] || 100.megabytes).to_i
     end
 
     def aws_access_key_id
@@ -89,11 +91,6 @@ module PgHero
       @gcp_database_id ||= config["gcp_database_id"]
     end
 
-    # environment variable is only used if no config file
-    def azure_resource_id
-      @azure_resource_id ||= config["azure_resource_id"]
-    end
-
     # must check keys for booleans
     def filter_data
       unless defined?(@filter_data)
@@ -101,7 +98,7 @@ module PgHero
           if config.key?("filter_data")
             config["filter_data"]
           elsif PgHero.config.key?("filter_data")
-            PgHero.config.key?("filter_data")
+            PgHero.config["filter_data"]
           else
             PgHero.filter_data
           end
@@ -118,12 +115,6 @@ module PgHero
       @filter_data
     end
 
-    # TODO remove in next major version
-    alias_method :access_key_id, :aws_access_key_id
-    alias_method :secret_access_key, :aws_secret_access_key
-    alias_method :region, :aws_region
-    alias_method :db_instance_identifier, :aws_db_instance_identifier
-
     private
 
     # check adapter lazily
@@ -132,7 +123,7 @@ module PgHero
         # rough check for Postgres adapter
         # keep this message generic so it's useful
         # when empty url set in Docker image pghero.yml
-        unless @connection_model.connection.adapter_name =~ /postg/i
+        unless @connection_model.connection_db_config.adapter.to_s.match?(/postg/i)
           raise Error, "Invalid connection URL"
         end
         @adapter_checked = true
@@ -148,11 +139,10 @@ module PgHero
 
       # resolve spec
       if !url && config["spec"]
-        raise Error, "Spec requires Rails 6+" unless PgHero.spec_supported?
-        config_options = {env_name: PgHero.env, PgHero.spec_name_key => config["spec"], include_replicas: true}
+        config_options = {env_name: PgHero.env, name: config["spec"], include_hidden: true}
         resolved = ActiveRecord::Base.configurations.configs_for(**config_options)
         raise Error, "Spec not found: #{config["spec"]}" unless resolved
-        url = ActiveRecord::VERSION::STRING.to_f >= 6.1 ? resolved.configuration_hash : resolved.config
+        url = resolved.configuration_hash
       end
 
       url = url.dup

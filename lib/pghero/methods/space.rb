@@ -6,11 +6,11 @@ module PgHero
       end
 
       def relation_sizes
-        select_all_size <<-SQL
+        select_all_size <<~SQL
           SELECT
             n.nspname AS schema,
             c.relname AS relation,
-            CASE WHEN c.relkind = 'r' THEN 'table' ELSE 'index' END AS type,
+            CASE c.relkind WHEN 'r' THEN 'table' WHEN 'm' then 'matview' ELSE 'index' END AS type,
             pg_table_size(c.oid) AS size_bytes
           FROM
             pg_class c
@@ -19,7 +19,7 @@ module PgHero
           WHERE
             n.nspname NOT IN ('pg_catalog', 'information_schema')
             AND n.nspname !~ '^pg_toast'
-            AND c.relkind IN ('r', 'i')
+            AND c.relkind IN ('r', 'm', 'i')
           ORDER BY
             pg_table_size(c.oid) DESC,
             2 ASC
@@ -27,7 +27,7 @@ module PgHero
       end
 
       def table_sizes
-        select_all_size <<-SQL
+        select_all_size <<~SQL
           SELECT
             n.nspname AS schema,
             c.relname AS table,
@@ -49,10 +49,10 @@ module PgHero
       def space_growth(days: 7, relation_sizes: nil)
         if space_stats_enabled?
           relation_sizes ||= self.relation_sizes
-          sizes = Hash[ relation_sizes.map { |r| [[r[:schema], r[:relation]], r[:size_bytes]] } ]
+          sizes = relation_sizes.to_h { |r| [[r[:schema], r[:relation]], r[:size_bytes]] }
           start_at = days.days.ago
 
-          stats = select_all_stats <<-SQL
+          sql = <<~SQL
             WITH t AS (
               SELECT
                 schema,
@@ -61,8 +61,8 @@ module PgHero
               FROM
                 pghero_space_stats
               WHERE
-                database = #{quote(id)}
-                AND captured_at >= #{quote(start_at)}
+                database = :id
+                AND captured_at >= :start_at
               GROUP BY
                 1, 2
             )
@@ -75,6 +75,7 @@ module PgHero
             ORDER BY
               1, 2
           SQL
+          stats = select_all_stats(sql, {id: id, start_at: start_at})
 
           stats.each do |r|
             relation = [r[:schema], r[:relation]]
@@ -92,23 +93,25 @@ module PgHero
       def relation_space_stats(relation, schema: "public")
         if space_stats_enabled?
           relation_sizes ||= self.relation_sizes
-          sizes = Hash[ relation_sizes.map { |r| [[r[:schema], r[:relation]], r[:size_bytes]] } ]
+          sizes = relation_sizes.to_h { |r| [[r[:schema], r[:relation]], r[:size_bytes]] }
           start_at = 30.days.ago
 
-          stats = select_all_stats <<-SQL
+          sql = <<~SQL
             SELECT
               captured_at,
               size AS size_bytes
             FROM
               pghero_space_stats
             WHERE
-              database = #{quote(id)}
-              AND captured_at >= #{quote(start_at)}
-              AND schema = #{quote(schema)}
-              AND relation = #{quote(relation)}
+              database = :id
+              AND captured_at >= :start_at
+              AND schema = :schema
+              AND relation = :relation
             ORDER BY
               1 ASC
           SQL
+          binds = {id: id, start_at: start_at, schema: schema, relation: relation}
+          stats = select_all_stats(sql, binds)
 
           stats << {
             captured_at: Time.now,
@@ -121,16 +124,22 @@ module PgHero
 
       def capture_space_stats
         now = Time.now
-        columns = %w(database schema relation size captured_at)
-        values = []
-        relation_sizes.each do |rs|
-          values << [id, rs[:schema], rs[:relation], rs[:size_bytes].to_i, now]
-        end
-        insert_stats("pghero_space_stats", columns, values) if values.any?
+        values =
+          relation_sizes.map do |rs|
+            {
+              database: id,
+              schema: rs[:schema],
+              relation: rs[:relation],
+              size: rs[:size_bytes].to_i,
+              captured_at: now
+            }
+          end
+        PgHero::SpaceStats.insert_all!(values) if values.any?
       end
 
-      def clean_space_stats
-        PgHero::SpaceStats.where(database: id).where("captured_at < ?", 90.days.ago).delete_all
+      def clean_space_stats(before: nil)
+        before ||= 90.days.ago
+        PgHero::SpaceStats.where(database: id).where("captured_at < ?", before).delete_all
       end
 
       def space_stats_enabled?

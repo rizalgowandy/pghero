@@ -2,7 +2,7 @@ module PgHero
   module Methods
     module Indexes
       def index_hit_rate
-        select_one <<-SQL
+        select_one <<~SQL
           SELECT
             (sum(idx_blks_hit)) / nullif(sum(idx_blks_hit + idx_blks_read), 0) AS rate
           FROM
@@ -11,7 +11,7 @@ module PgHero
       end
 
       def index_caching
-        select_all <<-SQL
+        select_all <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -29,7 +29,7 @@ module PgHero
       end
 
       def index_usage
-        select_all <<-SQL
+        select_all <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -47,7 +47,7 @@ module PgHero
       end
 
       def missing_indexes
-        select_all <<-SQL
+        select_all <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -68,8 +68,8 @@ module PgHero
          SQL
       end
 
-      def unused_indexes(max_scans: 50, across: [])
-        result = select_all_size <<-SQL
+      def unused_indexes(max_scans: 50, min_size: 0, across: [])
+        sql = <<~SQL
           SELECT
             schemaname AS schema,
             relname AS table,
@@ -82,11 +82,13 @@ module PgHero
             pg_index i ON ui.indexrelid = i.indexrelid
           WHERE
             NOT indisunique
-            AND idx_scan <= #{max_scans.to_i}
+            AND idx_scan <= :max_scans
+            AND pg_relation_size(i.indexrelid) >= :min_size
           ORDER BY
             pg_relation_size(i.indexrelid) DESC,
             relname ASC
         SQL
+        result = select_all_size(sql, {max_scans: max_scans.to_i, min_size: min_size.to_i})
 
         across.each do |database_id|
           database = PgHero.databases.values.find { |d| d.id == database_id }
@@ -104,7 +106,7 @@ module PgHero
       end
 
       def last_stats_reset_time
-        select_one <<-SQL
+        select_one <<~SQL
           SELECT
             pg_stat_get_db_stat_reset_time(oid) AS reset_time
           FROM
@@ -126,7 +128,7 @@ module PgHero
       # TODO parse array properly
       # https://stackoverflow.com/questions/2204058/list-columns-with-indexes-in-postgresql
       def indexes
-        indexes = select_all(<<-SQL
+        indexes = select_all(<<~SQL
           SELECT
             schemaname AS schema,
             t.relname AS table,
@@ -152,7 +154,7 @@ module PgHero
           ORDER BY
             1, 2
         SQL
-        ).map { |v| v[:columns] = v[:columns].sub(") WHERE (", " WHERE ").split(", ").map { |c| unquote(c) }; v }
+        ).select { |v| v[:definition] }.map { |v| v[:columns] = v[:columns].sub(") WHERE (", " WHERE ").split(", ").map { |c| unquote(c) }; v }
 
         # determine if any invalid indexes being created
         # hacky, but works for simple cases
@@ -186,7 +188,7 @@ module PgHero
       # thanks @jberkus and @mbanck
       def index_bloat(min_size: nil)
         min_size ||= index_bloat_bytes
-        select_all <<-SQL
+        sql = <<~SQL
           WITH btree_index_atts AS (
             SELECT
               nspname, relname, reltuples, relpages, indrelid, relam,
@@ -315,11 +317,12 @@ module PgHero
           INNER JOIN
             pg_index i ON i.indexrelid = rb.indexrelid
           WHERE
-            wastedbytes >= #{min_size.to_i}
+            wastedbytes >= :min_size
           ORDER BY
             wastedbytes DESC,
             index_name
         SQL
+        select_all(sql, {min_size: min_size.to_i}).select { |v| v[:definition] }
       end
 
       protected

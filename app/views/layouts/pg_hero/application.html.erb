@@ -5,8 +5,13 @@
 
     <meta charset="utf-8" />
     <%= favicon_link_tag "pghero/favicon.png" %>
-    <%= stylesheet_link_tag "pghero/application" %>
-    <%= javascript_include_tag "pghero/application" %>
+    <% if defined?(Propshaft::Railtie) && Rails.application.assets.is_a?(Propshaft::Assembly) %>
+      <%= stylesheet_link_tag "pghero/nouislider", "pghero/arduino-light", "pghero/application" %>
+      <%= javascript_include_tag "pghero/nouislider", "pghero/Chart.bundle", "pghero/chartkick", "pghero/highlight.min", "pghero/application", nonce: true %>
+    <% else %>
+      <%= stylesheet_link_tag "pghero/application" %>
+      <%= javascript_include_tag "pghero/application", nonce: true %>
+    <% end %>
   </head>
   <body>
     <div class="container">
@@ -43,7 +48,9 @@
             <% unless @database.replica? %>
               <li class="<%= controller.action_name == "maintenance" ? "active" : "" %>"><%= link_to "Maintenance", maintenance_path %></li>
             <% end %>
-            <li class="<%= controller.action_name == "explain" ? "active" : "" %>"><%= link_to "Explain", explain_path %></li>
+            <% if @explain_enabled %>
+              <li class="<%= controller.action_name == "explain" ? "active" : "" %>"><%= link_to "Explain", explain_path %></li>
+            <% end %>
             <li class="<%= controller.action_name == "tune" ? "active" : "" %>"><%= link_to "Tune", tune_path %></li>
           </ul>
 

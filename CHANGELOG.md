@@ -1,6 +1,133 @@
-## 2.8.2 (unreleased)
+## 4.1.0 (2026-10-20)
+
+- Restricted killing queries to current database and certain backend types - [more info](https://github.com/ankane/pghero/security/advisories/GHSA-5287-hmjh-qmqq)
+- Added grouping for parallel queries
+- Fixed error when index is dropped during indexes query
+- Fixed `<unable to filter data>` messages
+- Removed replication backends from live queries page
+
+## 4.0.1 (2026-08-15)
+
+- Added sequences from identity columns
+
+## 4.0.0 (2026-08-05)
+
+See the upgrade notes for [Docker](guides/Docker.md#upgrading) or [Rails](guides/Rails.md#upgrading)
+
+- Reduced space for historical query stats
+- Added `disable_kill` option to disable killing queries and connections
+- Added `unused_index_megabytes` option to set minimum size for unused indexes
+- Added copy button to explain visualize page
+- Fixed error with unlogged sequences on replicas
+- Dropped support for Postgres < 14
+- Dropped support for pg_query < 6
+- Dropped support for Sprockets < 4
+- Dropped support for google-cloud-monitoring < 1
+- Dropped support for system stats for Azure Database (Ruby SDK no longer supported)
+- Dropped support for Ruby API
+- Dropped support for Linux packages
+
+## 3.8.0 (2026-04-15)
+
+- Updated tune page for latest PgTune
+- Dropped support for Ruby < 3.3 and Rails < 7.2
+
+## 3.7.0 (2025-05-26)
+
+- Dropped support for Linux package for Ubuntu 20.04
+- Dropped support for Ruby < 3.2 and Rails < 7.1
+
+## 3.6.2 (2025-03-21)
+
+- Improved query in `sequences` method
+
+## 3.6.1 (2024-10-14)
+
+- Fixed error when Propshaft is installed but not used
+
+## 3.6.0 (2024-07-10)
+
+- Improved CSP support
+- Dropped support for Linux packages for Ubuntu 18.04, CentOS 7, and SLES 12
+- Dropped support for Ruby < 3.1 and Rails < 6.1
+
+## 3.5.0 (2024-05-21)
+
+- Added materialized views to space page and `relation_sizes` method
+- Added Linux package for Debian 12
+- Fixed error with `slow_queries` method
+
+## 3.4.1 (2024-02-07)
+
+- Added current stats to query details page
+- Improved tune page for latest PgTune
+
+## 3.4.0 (2023-11-28)
+
+- Added support for explaining normalized queries with Postgres 16
+- Added Docker image for `linux/arm64`
+
+## 3.3.4 (2023-09-05)
+
+- Fixed support for aliases in config file
+
+## 3.3.3 (2023-04-18)
+
+- Fixed error with system stats for Azure Database
+
+## 3.3.2 (2023-04-12)
+
+- Fixed error with suggested indexes and empty statements
+
+## 3.3.1 (2023-03-15)
+
+- Fixed error with Uglifier
+
+## 3.3.0 (2023-03-11)
+
+- Improved handling of lock timeouts
+- Improved syntax highlighting
+
+## 3.2.0 (2023-02-21)
+
+- Added support for pg_query 4
+- Added `pghero:clean_space_stats` rake task
+- Added support for specifying retention period with `clean_query_stats` and `clean_space_stats`
+- Removed reset button when historical query stats are enabled
+
+## 3.1.0 (2023-01-04)
+
+- Fixed explain error message leaking data - [more info](https://github.com/ankane/pghero/issues/439)
+- Explain analyze is now opt-in - [more info](https://github.com/ankane/pghero/issues/438)
+- Added support for disabling explain and explain analyze
+- Added support for visualize without explain analyze
+- Added `explain_v2` method
+
+## 3.0.1 (2022-10-09)
+
+- Fixed message when database user does not have permission to reset query stats
+
+## 3.0.0 (2022-09-13)
+
+- Changed `capture_query_stats` to only reset stats for current database in Postgres 12+
+- Changed `reset_query_stats` to only reset stats for current database (use `reset_instance_query_stats` to reset stats for entire instance)
+- Added `visualize_url` option to config
+- Removed `access_key_id`, `secret_access_key`, `region`, and `db_instance_identifier` methods (use `aws_` prefixed methods instead)
+- Dropped support for Linux packages for EOL versions
+- Dropped support for Ruby < 2.7 and Rails < 6
+- Dropped support for pg_query < 2
+- Dropped support for aws-sdk < 2
+
+## 2.8.3 (2022-05-01)
+
+- Added support for `google-apis-monitoring_v3`
+- Added experimental support for Propshaft
+- Fixed error with walsender queries on live queries page
+
+## 2.8.2 (2021-12-15)
 
 - Fixed sorting by name on space page when historical space stats are not enabled
+- Fixed deprecation warnings with Active Record 7
 
 ## 2.8.1 (2021-03-25)
 
@@ -257,7 +384,7 @@ PgHero.with(:database2) { PgHero.running_queries }
 ## 1.4.0 (2016-08-24)
 
 - Updated for Rails 5
-- Fixed error when `pg_stat_statements` not enabled in `shared_libaries`
+- Fixed error when `pg_stat_statements` not enabled in `shared_libraries`
 
 ## 1.3.2 (2016-08-03)
 
@@ -369,7 +496,7 @@ PgHero.with(:database2) { PgHero.running_queries }
 
 ## 0.1.7 (2014-11-12)
 
-- Added support for pg_stat_statments on Amazon RDS
+- Added support for pg_stat_statements on Amazon RDS
 - Added `long_running_query_sec`, `slow_query_ms` and `slow_query_calls` options
 
 ## 0.1.6 (2014-10-09)
@@ -407,4 +534,18 @@ PgHero.with(:database2) { PgHero.running_queries }
 
 ## 0.1.0 (2014-07-23)
 
-- First major release
+- Improved explanations
+- Updated design
+
+## 0.0.3 (2014-07-22)
+
+- Fixed `missing_indexes` method
+
+## 0.0.2 (2014-07-21)
+
+- Added `unused_tables` method
+- Added `database_size` method
+
+## 0.0.1 (2014-07-21)
+
+- First release
